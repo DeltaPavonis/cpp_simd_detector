@@ -13,12 +13,12 @@ int main()
     std::println("{:<20} = {}", "SSSE3", is_supported(SSSE3));
     std::println("{:<20} = {}", "SSE4.1", is_supported(SSE4_1));
     std::println("{:<20} = {}", "SSE4.2", is_supported(SSE4_2));
-    std::println();
+    std::println("");  // In C++26, `std::println();` with no arguments would be equivalent to this
 
     std::println("256-bit SIMD Instruction Sets:");
     std::println("{:<20} = {}", "AVX", is_supported(AVX));
     std::println("{:<20} = {}", "AVX2", is_supported(AVX2));
-    std::println();
+    std::println("");
 
     std::println("512-bit SIMD Instruction Sets:");
     std::println("{:<20} = {}", "AVX512_F", is_supported(AVX512_F));
@@ -38,11 +38,11 @@ int main()
     std::println("{:<20} = {}", "AVX512_4FMAPS", is_supported(AVX512_4FMAPS));
     std::println("{:<20} = {}", "AVX512_VP2INTERSECT", is_supported(AVX512_VP2INTERSECT));
     std::println("{:<20} = {}", "AVX512_FP16", is_supported(AVX512_FP16));
-    std::println();
+    std::println("");
 
     std::println("ARM Instruction Sets:");
     std::println("{:<20} = {}", "NEON", is_supported(NEON));
-    std::println();
+    std::println("");
 
     std::println("x86 Extensions:");
     std::println("{:<20} = {}", "PCLMULQDQ", is_supported(PCLMULQDQ));
