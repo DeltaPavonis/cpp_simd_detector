@@ -57,12 +57,11 @@ FMA3                 = true
 - **SSE instruction sets**: Up to SSE4.2, including SSSE3
 - **AVX instruction sets**: Up to AVX2
 - **AVX-512**: AVX-512 Foundation, and all standard AVX-512 features
-- **Extensions**: x86 Bit Manipulation Instruction sets, FMA3, and Carryless Multiplication instructions
+- **x86 Extensions**: x86 Bit Manipulation Instruction sets, FMA3, and Carryless Multiplication instructions
+- **ARM instruction sets**: NEON
 
 ## How to Build
 This project uses CMake as its build system, so it follows the usual CMake workflow:
 1. From the project directory, create a build directory (`mkdir build`).
 2. From `build`, run `cmake ..` to configure the build.
 3. Finally, build the project; if the previous step generated Makefiles, for instance, then use the command `make`.
-
-
