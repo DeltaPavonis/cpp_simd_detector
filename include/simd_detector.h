@@ -115,7 +115,7 @@ GCC/Clang) and `_M_AMD64` on MSVC), then we will detect supported instruction se
 the x86 `CPUID` and `XGETBV` instructions in conjunction. */
 #if defined(__x86_64__) || defined(_M_AMD64)
 
-namespace {  // Begin unnamed namespace
+namespace internal {  // Begin namespace `simd_detector::internal`
 
 /* `CPUIDDestinationRegister` enumerates the destination registers of the `cpuid` instruction.
 This is used to specify which register contains the bit corresponding to a given instruction
@@ -158,7 +158,7 @@ using enum CPUIDDestinationRegister;
 /* Now, `instruction_set_bit_locations` maps every `InstructionSet` to a corresponding
 `InstructionSetBitLocation`. The index of an `InstructionSet` in this array is given by
 its underlying `InstructionSet` value. */
-constexpr auto instruction_set_bit_locations = std::to_array<InstructionSetBitLocation>({
+inline constexpr auto instruction_set_bit_locations = std::to_array<InstructionSetBitLocation>({
     /* SSE instruction sets */
     {1, EDX, 25},  // SSE
     {1, EDX, 26},  // SSE2
@@ -231,7 +231,7 @@ exists, and otherwise falls back to inline assembly.
 The caller is responsible for ensuring that `eax`, `ebx`, `ecx`, and `edx` are all valid pointers,
 and that the desired leaf and subleaf values are properly stored in `eax` and `ecx` before calling.
 */
-void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
+inline void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 
     /* If our current compiler is MSVC, we delegate to the `__cpuidex` instrinic, which is provided
     as part of the "intrin.h" header. */
@@ -300,7 +300,7 @@ void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 
 /* `read_xcr0` returns the value of Extended Control Register 0 (XCR0), which it reads using the
 x86 `XGETBV` instruction. This function works across GCC, Clang, and MSVC. */
-auto read_xcr0() -> uint64_t {
+inline auto read_xcr0() -> uint64_t {
 
     /* Reading XCR0 is done by executing the `XGETBV` instruction with an input of 0. Now, if
     our current compiler is MSVC, we execute `XGETBV` by delegating to the `_xgetbv` intrinsic,
@@ -347,12 +347,14 @@ auto read_xcr0() -> uint64_t {
     #endif
 }
 
-};  // End unnamed namespace
+};  // End namespace `simd_detector::internal`
 
 /* Returns a bitmask representing instruction set support on the current machine. More specifically,
 support for every `InstructionSet` is indicated by the bit with position equal to the underlying
 value of that `InstructionSet`. */
-auto get_supported_instruction_sets() {
+inline auto get_supported_instruction_sets() {
+    using namespace internal;
+
     uint64_t supported_instruction_sets = 0;
 
     /* Currently, we make two different calls to `cpuid` to determine instruction set support:
@@ -483,7 +485,7 @@ x86-specific. */
 /* Returns a bitmask representing instruction set support on the current machine. More specifically,
 support for every `InstructionSet` is indicated by the bit with position equal to the underlying
 value of that `InstructionSet`. */
-auto get_supported_instruction_sets() {
+inline auto get_supported_instruction_sets() {
     /* On ARM64, the only supported `InstructionSet` will be NEON. */
     return uint64_t{1} << std::to_underlying(InstructionSet::NEON);
 }
@@ -494,14 +496,14 @@ auto get_supported_instruction_sets() {
 /* Returns a bitmask representing instruction set support on the current machine. More specifically,
 support for every `InstructionSet` is indicated by the bit with position equal to the underlying
 value of that `InstructionSet`. */
-auto get_supported_instruction_sets() -> uint64_t {
+inline auto get_supported_instruction_sets() -> uint64_t {
     return 0;
 }
 
 #endif
 
 /* Returns `true` iff the given `instruction_set` is supported. */
-bool is_supported(InstructionSet instruction_set) {
+inline bool is_supported(InstructionSet instruction_set) {
     /* Call `get_supported_instruction_sets` once and cache its value... */
     static auto supported_instruction_sets = get_supported_instruction_sets();
 
