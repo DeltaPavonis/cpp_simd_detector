@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.12)
 project(cpp_simd_detector
     LANGUAGES CXX)
 
+
+# --- Set the `CMAKE_BUILD_TYPE` variable if the user has not specified it already ---
+
 # Notify user if their build generator is multi-configuration, because this prevents
 # us from setting a default `CMAKE_BUILD_TYPE` (as multi-config generators ignore
 # the `CMAKE_BUILD_TYPE` variable).
@@ -25,24 +28,56 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-# Enumerate the source files for `cpp_simd_detector`...
-set(CPP_SIMD_DETECTOR_SOURCES
-    src/main.cpp
-)
 
-# ...and add the executable, which also has the name `cpp_simd_detector`.
-add_executable(cpp_simd_detector ${CPP_SIMD_DETECTOR_SOURCES})
+# --- Add `cpp_simd_detector` as an interface (header-only) library ---
 
-# Require C++23 for `cpp_simd_detector` (and because I use PUBLIC, also for all targets that link to
-# `cpp_simd_detector`), and also avoid having extensions being added.
-target_compile_features(cpp_simd_detector PUBLIC cxx_std_23)
+# In CMake, an "interface library" is a header-only library which produces no build artifacts, but
+# which has certain usage requirements (e.g. specific compiler options) that must be PROPAGATED to
+# any target which wishes to consume (link against) it. Interface libraries are CMake's abstraction
+# over header-only libraries, and we therefore add `cpp_simd_detector` as an interface library here.
+# This is done by passing the `INTERFACE` keyword to the regular `add_library` command .
+add_library(cpp_simd_detector INTERFACE)
+
+
+# --- Add compiler options and target properties --- 
+
+# `cpp_simd_detector` requires C++23. Thus, we will require C++23 for any target that consumes
+# (links against) `cpp_simd_detector`. This is achieved by passing the `INTERFACE` keyword to the
+# `target_compile_features` command, since `INTERFACE` is used to indicate that a given property or
+# dependency is meant to be used by consumers of a target, rather than the target itself. 
+target_compile_features(cpp_simd_detector INTERFACE cxx_std_23)
+
+# Additionally, disable the use of all non-standard C++ extensions in building `cpp_simd_detector`.
 set_target_properties(cpp_simd_detector PROPERTIES CXX_EXTENSIONS OFF)
 
 # Add the `-mxsave` option when compiling on GCC or Clang to enable the use of their `_xgetbv`
 # intrinsic (without `-mxsave`, attempting to call `_xgetbv` will result in a compilation error).
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(cpp_simd_detector PRIVATE -mxsave)
+
+    # Using the `INTERFACE` keyword here tells CMake to PROPAGATE the specified compiler options
+    # to any target that links to it.
+    target_compile_options(cpp_simd_detector INTERFACE -mxsave)
 endif()
 
-# Use `include/` as an include directory for building the `cpp_simd_detector` executable
-target_include_directories(cpp_simd_detector PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# --- Designate include directories for `cpp_simd_detector` ---
+
+# The only include directory for the `cpp_simd_detector` library will simply be `include/`,
+# which we pass to `target_include_directories`. Here, the `INTERFACE` keyword tells CMake
+# to propagate these include directories to any target which links to `cpp_simd_detector`;
+# as a result, those targets will be able to directly include "simd_detector.h", rather than
+# something like `cpp_simd_detector/include/simd_detector.h".
+target_include_directories(cpp_simd_detector INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+
+# --- Add custom build options ---
+
+# If the option `CPP_SIMD_DETECTOR_BUILD_EXAMPLES` is enabled, then we will build the example
+# usage of `cpp_simd_detector` presented in the `examples/` directory.
+option(CPP_SIMD_DETECTOR_BUILD_EXAMPLES "Build example programs" ON)
+
+# More specifically, if `CPP_SIMD_DETECTOR_BUILD_EXAMPLES` is enabled, then we will have CMake also
+# execute the `CMakeLists.txt` file present in `examples/`, which will build the example programs.
+if (CPP_SIMD_DETECTOR_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
