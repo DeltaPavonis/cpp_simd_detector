@@ -13,44 +13,42 @@ This file includes the following custom data types/free functions:
 
 #include <cstdint>
 #include <array>
-#include <utility>  // For `std::to_underlying`
+#include <utility>
 
-/* If the current instruction set architecture is x86-64, then we case on the current compiler
-to `#include` the intrinsics we need (for the `CPUID` and `XGETBV` instructions). */
+
+/* SIMD detection on x86-64 (aka AMD64) requires intrinsics for the CPUID/XGETBV instructions. */
 #if defined(__x86_64__) || defined(_M_AMD64)
 
-    /* Case on the current compiler, and `#include` any available compiler intrinsics for the
-    `CPUID` and `XGETBV` instructions. */
-    #if defined(__GNUC__) || defined(__clang__)
-        /* If our current compiler is GCC or clang, then we check for the existence of two headers:
-        - "cpuid.h", which contains the `__get_cpuid_count` intrinsic (which executes the `CPUID`
-        instruction); and,
-        - "immintrin.h", which contains the `_xgetbv` intrinsic (which executes the `XGETBV`
-        instruction). */
-
-        /* Check for the existence of "cpuid.h", which contains the `__get_cpuid_count` intrinsic */
-        #if __has_include("cpuid.h")
-            #include "cpuid.h"
+    // Where to get those intrinsics depends on the compiler.
+    #if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+        // If MSVC, we are guaranteed that "intrin.h" exists on supported x86/x64 target platforms
+        #if __has_include(<intrin.h>)
+            #include <intrin.h>
         #else
-            #define GCC_OR_CLANG_LACKS_CPUID_INTRINSIC
+            #error "cpp_simd_detector expects MSVC to provide <intrin.h> on x86-64"
         #endif
 
-        /* Then, check for the existence of "immintrin.h", which contains the `_xgetbv` intrinsic.
-        Note: Although the actual definition of the `_xgetbv` intrinsic resides in "xsaveintrin.h",
-        neither GCC nor Clang allow directly including "xsaveintrin.h". Instead, GCC recommends
-        using "x86gprintrin.h", and Clang recommends "immintrin.h". For simplicity, we consistently
-        use "immintrin.h", which is supported by both GCC and Clang, and which is also guaranteed
-        to be a superset of "x86gprintrin.h". */
-        #if __has_include("immintrin.h")
-            #include "immintrin.h"
-        #else 
-            #define GCC_OR_CLANG_LACKS_XGETBV_INTRINSIC
+    #elif (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+        // If GCC/Clang, check <cpuid.h> and <immintrin.h> for `__get_cpuid_count` and `_xgetbv`,
+        // respectively. These two intrinsics execute CPUID and XGETBV.
+        // Note: clang-cl defines __clang__ and _MSC_VER, which is why we exclude the latter above
+
+        #if __has_include(<cpuid.h>)
+            #include <cpuid.h>
+        #else
+            #define GCC_OR_CLANG_LACKS_CPUID
         #endif
-        
-    #elif defined(_MSC_VER)
-        /* Otherwise, if our current compiler is MSVC, then we can directly include the "intrin.h"
-        header, which is guaranteed to exist on supported x86/x64 target platforms. */
-        #include "intrin.h"
+
+        // Note: `_xgetbv` is actually defined in <xsaveintrin.h>, but both GCC/Clang disallow
+        // including that. GCC/Clang instead recommend including <x86gprintin.h> and <immintrin.h>
+        // so we'll just use the latter, since it's guaranteed to include the former.
+        #if __has_include(<immintrin.h>)  // This should always be true on GCC/Clang; just in case
+            #include <immintrin.h>
+        #else 
+            #define GCC_OR_CLANG_LACKS_XGETBV
+        #endif
+    #else
+        #error "Unsupported compiler; cpp_simd_detector only supports GCC/Clang/MSVC"
     #endif
     
 #endif
@@ -104,60 +102,30 @@ enum class InstructionSet : unsigned {
     Sentinel,
 };
 
-/* `get_supported_instruction_sets` currently returns a 64-bit bitmask, which requires the
-implicit assumption that `InstructionSet` enumerates at most 64 instruction sets. We verify
-that here. */
+/* Make sure `uint64_t` can hold all instruction set support information */
 static_assert(std::to_underlying(InstructionSet::Sentinel) < 64);
 
-/* Now, to define `get_supported_instruction_sets`, we case on the current instruction set
-architecture (x86-64 or ARM64). If we are on x86-64 (detected by the macro `__x86_64__` on
-GCC/Clang) and `_M_AMD64` on MSVC), then we will detect supported instruction sets using
-the x86 `CPUID` and `XGETBV` instructions in conjunction. */
+/* Define `get_supported_instruction_sets` depending on the current ISA (x86-64 or ARM64). */
 #if defined(__x86_64__) || defined(_M_AMD64)
 
 namespace internal {  // Begin namespace `simd_detector::internal`
 
-/* `CPUIDDestinationRegister` enumerates the destination registers of the `cpuid` instruction.
-This is used to specify which register contains the bit corresponding to a given instruction
-set. */
-enum class CPUIDDestinationRegister : unsigned {
-    /* The destination registers for `cpuid` are %eax, %ebx, %ecx, and %edx, which we represent
-    using the values EAX, EBX, ECX, and EDX. We further set the underlying values of EAX/EBX/ECX/EDX=
-    to 0/1/2/3, because those underlying values will be later used as indexes into an array
-    containing the four registers [%eax, %ebx, %ecx, %edx]. */
-    EAX,
-    EBX,
-    ECX,
-    EDX
-};
+/* `CPUIDDestinationRegister` = destination registers of the `cpuid` instruction, used to
+specify which register contains the bit corresponding to a given instruction set. */
+enum class CPUIDDestinationRegister : unsigned { EAX, EBX, ECX, EDX };
 
 /* `InstructionSetBitLocation` specifies the exact location of the bit that indicates support
 for a given instruction set. */
 struct InstructionSetBitLocation {
-    /* `cpuid_leaf` = Whichever leaf (input parameter) was passed to `cpuid` to query support
-    for the current instruction set. This allows us to determine which call to `cpuid` (and thus,
-    which specific SET of destination registers) contains the bit corresponding to the current
-    instruction set. */
-    int cpuid_leaf;
-
-    /* `reg` = Whichever destination register (%ebx, %ecx, or %edx) contains the bit corresponding
-    to the current instruction set. */
-    CPUIDDestinationRegister reg;
-
-    /* Finally, `bit_position` represents the position of the desired bit within that destination
-    register. */
-    unsigned bit_position;
+    int cpuid_leaf;                // Leaf passed to CPUID
+    CPUIDDestinationRegister reg;  // Which of %e[b,c,d]x contains the desired bit
+    unsigned bit_position;         // Position of the desired bit in `reg`
 };
 
-/* Bring the values of `CPUIDDestinationRegister` into scope to make the below initialization of
-`instruction_set_bit_locations` less verbose. Note that because we are in an unnamed `namespace`,
-this does not pollute the global scope namespace of including files, as all the `enum` values will
-still have internal linkage. */
+
 using enum CPUIDDestinationRegister;
 
-/* Now, `instruction_set_bit_locations` maps every `InstructionSet` to a corresponding
-`InstructionSetBitLocation`. The index of an `InstructionSet` in this array is given by
-its underlying `InstructionSet` value. */
+/* `instruction_set_bit_locations` maps `InstructionSet`s to `InstructionSetBitLocation`s. */
 inline constexpr auto instruction_set_bit_locations = std::to_array<InstructionSetBitLocation>({
     /* SSE instruction sets */
     {1, EDX, 25},  // SSE
@@ -205,50 +173,24 @@ inline constexpr auto instruction_set_bit_locations = std::to_array<InstructionS
     {-1, EAX, 0}
 });
 
-/* Verify that `instruction_set_bit_locations` has the same size as the `InstructionSet` enum; that
-there is a one-to-one-correspondence between `InstructionSetBitLocation`s and `InstructionSet`s. */
+/* One-to-one-correspondence between `InstructionSetBitLocation`/`InstructionSet`s */
 static_assert(instruction_set_bit_locations.size() ==
               std::to_underlying(InstructionSet::Sentinel) + 1);
 
 /* --- IMPLEMENT `cpuid` AND `xgetbv` INSTRUCTION WRAPPERS --- */
 
-/* `cpuid` executes the x86 `CPUID` instruction, treating `eax`/`ebx`/`ecx`/`edx` as pointers to
-the `%eax`, `%ebx`, `%ecx`, and `%edx` registers, respectively. More specifically:
-- `eax` is treated as a pointer to `%eax`, which is used by `CPUID` as both an input and an output
-register. More specifically, the initial value of `%eax` is called the "leaf", and it determines
-the main category of information returned by `CPUID` (ex: a leaf of 1 returns feature information).
-- `ebx` is treated as a pointer to `%ebx`, which is used solely as an output register by `CPUID`.
-- `ecx` is treated as a pointer to `%ecx`, which is used by `CPUID` as both an input and an output
-register. More specifically, the initial value of `%ecx` is called the "subleaf", and it provides
-finer-grained control over information within an existing leaf.
-- `edx` is treated as a pointer to `%edx`, which is used solely as an output register by `CPUID`.
-
-This function works across GCC, Clang, and MSVC.
-- For MSVC, it delegates to the `__cpuidex` intrinsic, which is provided as part of `<immintrin.h>`.
-- For GCC and Clang, it delegates to the `__get_cpuid_count` intrinsic if the `<cpuid.h>` header
-exists, and otherwise falls back to inline assembly.
-
-The caller is responsible for ensuring that `eax`, `ebx`, `ecx`, and `edx` are all valid pointers,
-and that the desired leaf and subleaf values are properly stored in `eax` and `ecx` before calling.
-*/
+/* Executes the `CPUID` instruction given `eax`/`ebx`/`ecx`/`edx`. Works across GCC/Clang/MSVC. */
 inline void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 
-    /* If our current compiler is MSVC, we delegate to the `__cpuidex` instrinic, which is provided
-    as part of the "intrin.h" header. */
+    /* If MSVC, use `__cpuidex` from <intrin.h> */
     #if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
-        /* ^^ Note: See Stack Overflow (https://tinyurl.com/5ffxjvnn) for why we check that
-        __clang__ and __INTEL_COMPILER are not defined when determining if the current compiler
-        is MSVC. */
 
-        /* `__cpuidex` executes the `CPUID` instruction with the given leaf and subleaf (which are
-        stored in `*eax` and `*ecx`, respectively), and writes the values of the output registers
-        `%eax`/`%ebx`/`%ecx`/`%edx` to the given output array (`cpu_info` here). Note that we use
-        the `__cpuidex` intrinsic instead of `__cpuid`, because the latter does not allow specifying
-        the subleaf. Source: the MSVC documentation: https://tinyurl.com/5h4nym4f). */
+        /* `__cpuidex` takes leaf/subleaf in `*eax`/`*ecx`. Note that `__cpuid` exists but doesn't
+        have a parameter for the subleaf, which we need here. */
         int cpu_info[4];
         __cpuidex(cpu_info, *eax, *ecx);
 
-        /* Copy the values of the output registers back to `eax`/`ebx`/`ecx`/`edx`. */
+        /* `__cpuidex` writes to an output array (`cpu_info`) */
         *eax = static_cast<unsigned>(cpu_info[0]);
         *ebx = static_cast<unsigned>(cpu_info[1]);
         *ecx = static_cast<unsigned>(cpu_info[2]);
@@ -256,215 +198,140 @@ inline void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 
         return;
 
-    /* Otherwise, if our current compiler is GCC or Clang, we case on whether or not the "cpuid.h"
-    header was successfully `#include`d. If it was, then we delegate to the `__get_cpuid_count`
-    intrinsic it provides. */
-    #elif !defined(GCC_OR_CLANG_LACKS_CPUID_INTRINSIC)
+    /* Otherwise, if GCC or Clang, either use `__get_cpuid_count` (if "cpuid.h" was found) or else
+    fall back to inline assembly. */
+    #elif !defined(GCC_OR_CLANG_LACKS_CPUID)
 
-        /* `__get_cpuid_count` executes the `CPUID` instruction with the leaf and subleaf (`*eax`
-        and `*ecx` here) given in its first two parameters, and writes the values of the output
-        registers to the pointers passed in.  */
+        /* `__get_cpuid_count` takes leaf/subleaf in `*eax` and `*ecx`. */
         if (!__get_cpuid_count(*eax, *ecx, eax, ebx, ecx, edx)) {
-            /* `__get_cpuid_count` will return 0 if the given leaf (`*eax`) is unsupported. This
-            will only happen on very old processors, but if it does happen, we will conservatively
-            set all of the output registers to 0 (indicating that nothing is supported) to avoid
-            any false positives. */
+            // 0 will be returned if the leaf `*eax` is unsupported. This may happen on very old
+            // processors; if it does, we set all outputs to 0 to indicate no SIMD support.
             *eax = *ebx = *ecx = *edx = 0;
         }
 
         return;
 
-    /* Finally, if our current compiler is GCC or Clang but we do NOT have the "cpuid.h" header,
-    then we fall back to inline assembly. */
-    #else
+    #else  // Fall back to inline assembly
 
-        /* Use inline assembly to execute the `CPUID` instruction. The input register values are
-        given in `*eax` and `*ecx`, and the output registers' values are directed to be written
-        to  `*eax`/`*ebx`/`*ecx`/`*edx`. */
+        /* Inputs are `*eax`/`*ecx`, and we direct outputs to be written to `*e[a,b,c,d]x`. */
         asm volatile("cpuid\n\t"
-                /* This line specifies the output registers of the instruction; the output registers
-                are %eax/%ebx/%ecx/%edx (represented by "=a"/"=b"/"=c"/"=d"), whose values we write
-                back to `*eax`/`*ebx`/`*ecx`/`*edx`. */
-                : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
-                /* This line specifies the input registers to the instruction; the input registers
-                are %eax and %ecx (represented by "0" and "2"), which will contain the leaf (`*eax`)
-                and subleaf (`*ecx`), respectively. */
-                : "0"  (*eax), "2"  (*ecx));
-        
-        /* Note: Alternatively, we would change "=a" and "=c" to "+a" and "+c". This signals that
-        the output registers `%eax` and `%ecx` are also to be treated as input registers, which is
-        what we need here. */
+            : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)  // Specify outputs
+            : "0"  (*eax), "2"  (*ecx)  // Inputs (0 = %eax, 2 = %ecx; leaf and subleaf)
+        );
+
+        // Alternatively, change "=[a,c]" to "+[a, c]", which means the outputs %e[a,c]x are
+        // also to be treated as inputs, which is what we need here.
 
     #endif
 }
 
-/* `read_xcr0` returns the value of Extended Control Register 0 (XCR0), which it reads using the
-x86 `XGETBV` instruction. This function works across GCC, Clang, and MSVC. */
-inline auto read_xcr0() -> uint64_t {
-
-    /* Reading XCR0 is done by executing the `XGETBV` instruction with an input of 0. Now, if
-    our current compiler is MSVC, we execute `XGETBV` by delegating to the `_xgetbv` intrinsic,
-    which is provided by the "intrin.h" header. */
-    #if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
-        /* ^^ Note: See Stack Overflow (https://tinyurl.com/5ffxjvnn) for why we check that
-        __clang__ and __INTEL_COMPILER are not defined when determining if the current compiler
-        is MSVC. */
-
-        /* To read XCR0, we use an input value of 0 to `_xgetbv`. */
-        return _xgetbv(0);
-    
-    /* Otherwise, if our current compiler is GCC or Clang, we case on whether or not the
-    "x86gprintrin.h" header was successfully `#include`d. If it was, then we delegate to
-    the `_xgetbv` intrinsic it provides. */
-    #elif !defined(GCC_OR_CLANG_LACKS_XGETBV_INTRINSIC)
-
-        /* Once again, to read XCR0, we pass in 0 as the input to `_xgetbv` . Unlike MSVC's
-        `_xgetbv`, GCC/Clang's `_xgetbv` returns a signed 64-bit integer, so we cast it before
-        returning. */
-        return static_cast<uint64_t>(_xgetbv(0));
-    
-    /* Finally, if our current compiler is GCC or Clang but we do NOT have the "x86gprintrin.h"
-    header, then we fall back to inline assembly. */
-    #else
-
-        /* Use inline assembly to execute the `XGETBV` instruction with an input of 0; this will
-        cause the higher-order 32 bits of XCR0 to be written to `%edx`, and the lower-order 32
-        bits to be written to `%eax`. It therefore remains to assemble those two pieces back
-        into the final 64-bit value. */
+/* Define `read_xcr0`, which reads XCR0 using `xgetbv(0)`. Works across GCC/Clang/MSVC. */
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+    /* If MSVC, just use `_xgetbv` from <intrin.h> */
+    inline auto read_xcr0() -> uint64_t { return _xgetbv(0); }
+#elif !defined(GCC_OR_CLANG_LACKS_XGETBV)
+    /* If GCC or Clang, either use `_xgetbv` from <immintrin.h> or fall back to inline assembly.
+    IMPORTANT: This requires enabling the `xsave` target feature (either by using a function-level
+    target attribute, as we do, or by adding the `-mxsave` flag to the compiler; we choose the
+    former since the `-mxsave` flag only exists on x86).
+    IMPORTANT: We force `read_xcr0` to not be inlined to prevent `_xgetbv` from being inlined into
+    other code (which may cause target-specific option mismatches, if it gets inlined into code
+    which doesn't have `__attribute__((target("xsave")))` on it. The compiler might be smart enough
+    to know never to do this, but just in case). */
+    __attribute__((target("xsave"), noinline))
+    inline auto read_xcr0() -> uint64_t {
+        return static_cast<uint64_t>(_xgetbv(0)); // Cast b.c. GCC/Clang `_xgetbv` returns `int64_t`
+    }
+#else  // Fall back to inline assembly
+    inline auto read_xcr0() -> uint64_t {
+        /* `xgetbv(0)` writes the upper/lower 32 bits of XCR0 to `%e[d,a]x` */
         uint32_t xcr0_low_32_bits, xcr0_high_32_bits;
         asm volatile("xgetbv\n\t"
-                    /* This line specifies the output registers of the instruction, which are
-                    `%eax` and `%edx` (represented by "=a" and "=d"). We direct the values of those
-                    output registers to be written to `xcr0_low_32_bits` and `xcr0_high_32_bits`,
-                    respectively. */
-                    : "=a" (xcr0_low_32_bits), "=d" (xcr0_high_32_bits)
-                    /* This line specifies the input register(s) to the instruction, which is
-                    only `%ecx`, which we set to 0 (in order to read XCR0). */
-                    : "c"  (0));
+            : "=a" (xcr0_low_32_bits), "=d" (xcr0_high_32_bits)  // Specify outputs
+            : "c"  (0)  // Inputs (c = %ecx)
+        );
 
-        /* Return the full 64-bit value of XCR0. */
+        // Stitch `xcr0_[low,high]_32_bits` together into a `uint64_t`
         return (static_cast<uint64_t>(xcr0_high_32_bits) << 32) | xcr0_low_32_bits;
-    #endif
-}
+    }
+#endif
 
 };  // End namespace `simd_detector::internal`
 
-/* Returns a bitmask representing instruction set support on the current machine. More specifically,
-support for every `InstructionSet` is indicated by the bit with position equal to the underlying
-value of that `InstructionSet`. */
+/* Returns a bitmask representing instruction set support on the current machine */
 inline auto get_supported_instruction_sets() {
     using namespace internal;
 
     uint64_t supported_instruction_sets = 0;
 
-    /* Currently, we make two different calls to `cpuid` to determine instruction set support:
-    one with leaf 1 and one with leaf 7. Thus, we maintain two separate sets of the four registers
-    %eax/%ebx/%ecx/%edx, which we store in arrays to enable convenient access via indexing. */
+    /* We make two calls to `CPUID` (leaf 1 and leaf 7) */
     std::array<unsigned, 4> registers_for_leaf_1, registers_for_leaf_7;
     auto &[eax_leaf_1, ebx_leaf_1, ecx_leaf_1, edx_leaf_1] = registers_for_leaf_1;
     auto &[eax_leaf_7, ebx_leaf_7, ecx_leaf_7, edx_leaf_7] = registers_for_leaf_7;
 
-    /* Execute `cpuid` with a leaf of 1 and a subleaf of 0; this will write processor info and
-    feature bits back to the `registers_for_leaf1`. */
+    // Leaf 1
     eax_leaf_1 = 1;
     ecx_leaf_1 = 0;
     cpuid(&eax_leaf_1, &ebx_leaf_1, &ecx_leaf_1, &edx_leaf_1);
 
-    /* Execute `cpuid` with a leaf of 7 and a subleaf of 0; this will write extended feature
-    information back to the `registers_for_leaf7`. */
+    // Leaf 7
     eax_leaf_7 = 7;
     ecx_leaf_7 = 0;
     cpuid(&eax_leaf_7, &ebx_leaf_7, &ecx_leaf_7, &edx_leaf_7);
 
-    /* `set_bit_for_instruction_set` sets the bit corresponding to the given `instruction_set`
-    in the `supported_instruction_sets` bitmask. */
+    /* Sets the bit for one instruction set in `supported_instruction_sets` */
     auto set_bit_for_instruction_set = [&](InstructionSet instruction_set) {
-        
-        /* The key idea: The position of the bit corresponding to an instruction set in the
-        returned bitmask will simply be its underlying `InstructionSet` value. */
-        auto index = std::to_underlying(instruction_set);
+    
+        auto const index = std::to_underlying(instruction_set);
 
         /* Now, read the bit returned from `CPUID` corresponding to the given instruction set.
-        First, we query `instruction_set_bit_locations` to determine the exact location of that
-        bit in the `CPUID` registers; the desired bit is located in the set of registers returned
-        from the call to `cpuid` with the given `cpuid_leaf`, in the register `reg`, at the
-        bit position `bit_pos`. */
-        auto [cpuid_leaf, reg, bit_pos] = instruction_set_bit_locations[index];
+        First go to `instruction_set_bit_locations` to determine where that bit is */
+        auto const [cpuid_leaf, reg, bit_pos] = instruction_set_bit_locations[index];
 
-        /* Again, `cpuid_leaf` tells us which set of registers the current instruction set's bit
-        is located in. */
+        /* Read the returned registers with the leaf `cpuid_leaf`, in the register `reg`, at the
+        bit position `bit_pos`, and set that in `supported_instruction_sets` */
         const auto &registers = (cpuid_leaf == 1 ? registers_for_leaf_1 : registers_for_leaf_7);
+        auto const register_index = std::to_underlying(reg);
 
-        /* Then, recall that the index of a register `reg` within a `registers` array is given
-        by its underlying `CPUIDDestinationRegister` value. */
-        auto register_index = std::to_underlying(reg);
-
-        /* Finally, we set the `index`-position bit in `supported_instruction_sets` to the
-        `bit_pos`-position bit in the register `reg`. */
         supported_instruction_sets |= ((registers[register_index] >> bit_pos) & 1) << index;
     };
 
     using enum InstructionSet;
 
-    /* [Shortened] Read XCR0 and use it to verify OS-level support for SIMD instruction sets. */
+    /* Read XCR0 and use it to verify OS-level support for SIMD instruction sets. */
 
-    /* [1] First, we check support for all XCR0-INDEPENDENT instruction sets. */
+    /* Before reading XCR0, check support for all instruction sets that don't require it */
     for (auto xcr0_independent_instruction_set : {PCLMULQDQ, BMI1, BMI2}) {
         set_bit_for_instruction_set(xcr0_independent_instruction_set);
     }
-    
-    /* [2] Then, attempt to read the XCR0 extended control register. */
 
-    /* Reading the XCR0 control register is done by executing the `XGETBV` instruction with an input
-    of 0. However, before executing `XGETBV`, we will need to verify that both the processor and the
-    OS support it. This is done by inspecting bits 26 and 27 in the `%ecx` register returned from
-    the call to `CPUID` with a leaf of 1; if both bits are true, then `XGETBV` is supported. */
-    bool has_xsave_support = (ecx_leaf_1 >> 26) & 1, has_osxsave_support = (ecx_leaf_1 >> 27) & 1;
-    if (!(has_xsave_support && has_osxsave_support)) {
-        /* If we lack processor and/or OS-level support for `XGETBV`, then we will be unable to
-        read XCR0, and so we will conservatively assume that there is no OS support for any of the
-        remaining instruction sets. As a result, we will return early in that case. */
+    /* Read XCR0 using `XGETBV`. Before that, we need to check if `XGETBV` itself is supported.
+    Thankfully, that's given in the result of executing `CPUID` with a leaf of 1. */
+    bool const has_xsave_support = (ecx_leaf_1 >> 26) & 1;
+    bool const has_osxsave_support = (ecx_leaf_1 >> 27) & 1;
+    if (!(has_xsave_support && has_osxsave_support)) {  // No support for `XGETBV`; assume no SIMD
         return supported_instruction_sets;
     }
 
-    /* Otherwise, if `XGETBV` has both processor-level and OS-level support, we will use it to read
-    the value of the XCR0 extended control register. */
-    auto xcr0 = read_xcr0();
+    /* `XGETBV` is supported, use it to read XCR0 */
+    auto const xcr0 = read_xcr0();
 
-    /* [3] Now, using the bits in the XCR0 register, we will check whether the SIMD instruction sets
-    are fully supported (supported by the current OS as well as the current processor). We will
-    specifically check the SSE, AVX, and AVX-512 instruction sets in that order. */
-
-    /* [3][a] Bit 1 in XCR0 indicates OS support for SSE. If this is false, then we return
-    immediately, as a lack of OS support for SSE implies a lack of OS support for AVX and AVX-512
-    as well. */
-    if (!((xcr0 >> 1) & 1)) return supported_instruction_sets;
-    
-    /* Otherwise, we will update `supported_instruction_sets` with all the SSE instruction sets. */
-    for (auto sse_instruction_set : {SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2}) {
+    /* Bit 1/2/[5,6,7] in XCR0 indicates OS support for SSE/AVX/AVX-512. */
+    if (!((xcr0 >> 1) & 1)) { return supported_instruction_sets; }
+    for (auto const sse_instruction_set : {SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2}) {
         set_bit_for_instruction_set(sse_instruction_set);
     }
 
-    /* [3][b] Then, bit 2 in XCR0 indicates OS support for the AVX instruction set. If this is
-    false, then we again return immediately, as a lack of OS support for AVX implies a lack of OS
-    support for AVX-512 as well. */
-    if (!((xcr0 >> 2) & 1)) return supported_instruction_sets;
-
-    /* Otherwise, we will update `supported_instruction_sets` with all the AVX instruction sets
-    and extensions. */
-    for (auto avx_instruction_set : {AVX, AVX2, FMA3}) {
+    if (!((xcr0 >> 2) & 1)) { return supported_instruction_sets; }
+    for (auto const avx_instruction_set : {AVX, AVX2, FMA3}) {
         set_bit_for_instruction_set(avx_instruction_set);
     }
 
-    /* [3][c] Finally, OS support for AVX-512 is indicated by bits 5, 6, and 7 in XCR0. If any of
-    these three bits are false, then we return immediately once more. */
-    if (auto avx512_xcr0_mask = 0b0111'0000U; (xcr0 & avx512_xcr0_mask) != avx512_xcr0_mask) {
+    if (auto const avx512_xcr0_mask = 0b0111'0000U; (xcr0 & avx512_xcr0_mask) != avx512_xcr0_mask) {
         return supported_instruction_sets;
     }
 
-    /* Otherwise, we update `supported_instruction_sets` with all the AVX-512 instruction sets.
-    Afterwards, we are done. */
-    for (auto avx512_instruction_set : {
+    for (auto const avx512_instruction_set : {
         AVX512_F, AVX512_DQ, AVX512_IFMA, AVX512_PF, AVX512_ER, AVX512_CD, AVX512_BW, AVX512_VL,
         AVX512_VBMI, AVX512_VBMI2, AVX512_VNNI, AVX512_BITALG, AVX512_VPOPCNTDQ, AVX512_4VNNIW,
         AVX512_4FMAPS, AVX512_VP2INTERSECT, AVX512_FP16
@@ -472,45 +339,45 @@ inline auto get_supported_instruction_sets() {
         set_bit_for_instruction_set(avx512_instruction_set);
     }
 
+    /* Having checked processor/OS support for SSE/AVX/AVX-512 and everything else, we're done */
     return supported_instruction_sets;
 }
 
-/* If our current instruction set architecture is ARM64, then `get_supported_instruction_sets` will
-simply return a bitmask with only the bit for `InstructionSet::NEON` set. This is because 64-bit
-ARM is guaranteed to support NEON (sources: the ARM documentation (https://tinyurl.com/mbkzxpa8)
-and Wikipedia (https://tinyurl.com/mvcdk559)), and as every other `InstructionSet` is currently
-x86-specific. */
+/* If the ISA's ARM64, our job is easy; ARM64 is guaranteed to support Neon, and that's the only
+ARM instruction set we have in `InstructionSet`. */
 #elif defined(__aarch64__) || defined(_M_ARM64)
 
-/* Returns a bitmask representing instruction set support on the current machine. More specifically,
-support for every `InstructionSet` is indicated by the bit with position equal to the underlying
-value of that `InstructionSet`. */
+/* Returns a bitmask representing instruction set support on the current machine. */
 inline auto get_supported_instruction_sets() {
-    /* On ARM64, the only supported `InstructionSet` will be NEON. */
     return uint64_t{1} << std::to_underlying(InstructionSet::NEON);
 }
 
-/* Fallback case; `cpp_simd_detector` currently handles only the x86-64 and ARM64 ISAs. */
 #else
 
-/* Returns a bitmask representing instruction set support on the current machine. More specifically,
-support for every `InstructionSet` is indicated by the bit with position equal to the underlying
-value of that `InstructionSet`. */
-inline auto get_supported_instruction_sets() -> uint64_t {
-    return 0;
-}
+#warning "Unsupported ISA; cpp_simd_detector only supports x86-64 and ARM64"
+
+/* Returns a bitmask representing instruction set support on the current machine */
+inline auto get_supported_instruction_sets() -> uint64_t { return 0; }
 
 #endif
 
-/* Returns `true` iff the given `instruction_set` is supported. */
-inline bool is_supported(InstructionSet instruction_set) {
-    /* Call `get_supported_instruction_sets` once and cache its value... */
-    static auto supported_instruction_sets = get_supported_instruction_sets();
-
-    /* ...then simply read and return the bit corresponding to the given `instruction_set`. */
+/* Returns whether the given `instruction_set` is supported. */
+inline bool is_supported(InstructionSet const instruction_set) {
+    /* Call `get_supported_instruction_sets` once */
+    static auto const supported_instruction_sets = get_supported_instruction_sets();
     return (supported_instruction_sets >> std::to_underlying(instruction_set)) & 1;
 }
 
 };  // End namespace `simd_detector`
+
+
+// Undefine any macros we defined
+#ifdef GCC_OR_CLANG_LACKS_CPUID
+    #undef GCC_OR_CLANG_LACKS_CPUID
+#endif
+
+#ifdef GCC_OR_CLANG_LACKS_XGETBV
+    #undef GCC_OR_CLANG_LACKS_XGETBV
+#endif
 
 #endif
