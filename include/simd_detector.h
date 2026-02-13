@@ -20,8 +20,8 @@ This file includes the following custom data types/free functions:
 #if defined(__x86_64__) || defined(_M_AMD64)
 
     // Where to get those intrinsics depends on the compiler.
-    #if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
-        // If MSVC, we are guaranteed that "intrin.h" exists on supported x86/x64 target platforms
+    #if defined(_MSC_VER) && !defined(__INTEL_COMPILER)
+        // If MSVC (or clang-cl), "intrin.h" must exist on supported x86/x64 target platforms
         #if __has_include(<intrin.h>)
             #include <intrin.h>
         #else
@@ -40,7 +40,7 @@ This file includes the following custom data types/free functions:
         #endif
 
         // Note: `_xgetbv` is actually defined in <xsaveintrin.h>, but both GCC/Clang disallow
-        // including that. GCC/Clang instead recommend including <x86gprintin.h> and <immintrin.h>
+        // including that. GCC/Clang instead recommend including <x86gprintrin.h> and <immintrin.h>
         // so we'll just use the latter, since it's guaranteed to include the former.
         #if __has_include(<immintrin.h>)  // This should always be true on GCC/Clang; just in case
             #include <immintrin.h>
