@@ -183,7 +183,7 @@ static_assert(instruction_set_bit_locations.size() ==
 inline void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 
     /* If MSVC, use `__cpuidex` from <intrin.h> */
-    #if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+    #if defined(_MSC_VER) && !defined(__INTEL_COMPILER)
 
         /* `__cpuidex` takes leaf/subleaf in `*eax`/`*ecx`. Note that `__cpuid` exists but doesn't
         have a parameter for the subleaf, which we need here. */
@@ -226,7 +226,7 @@ inline void cpuid(unsigned *eax, unsigned *ebx, unsigned *ecx, unsigned *edx) {
 }
 
 /* Define `read_xcr0`, which reads XCR0 using `xgetbv(0)`. Works across GCC/Clang/MSVC. */
-#if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+#if defined(_MSC_VER) && !defined(__INTEL_COMPILER)
     /* If MSVC, just use `_xgetbv` from <intrin.h> */
     inline auto read_xcr0() -> uint64_t { return _xgetbv(0); }
 #elif !defined(GCC_OR_CLANG_LACKS_XGETBV)
